@@ -145,6 +145,7 @@ def main():
         device = f"cuda:{i}" if torch.cuda.is_available() and torch.cuda.device_count() > i else "cpu"
         device_list.append(device)
         model_instance = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype="auto").to(device)
+        model_instance.config.use_cache = True
         model_list.append(model_instance)
     
     # Read input JSONL file
