@@ -86,7 +86,6 @@ def evaluate_entry(data_entry, tokenizer, model, device, max_length=4096, mini_b
         model=model
     )
     
-    print(f"Scores: {scores}")
     # Lower loss indicates better candidate.
     sorted_candidates = sorted(scores.items(), key=lambda x: x[1])
     best_candidate, best_loss = sorted_candidates[0]
@@ -118,7 +117,7 @@ def process_item(data_item, tokenizer, model, device, max_length, mini_batch_siz
             time.sleep(1)
     if score is None:
         score = 1
-        best_loss = float("inf")
+        best_loss = 999999
         best_candidate = "This is score 1"
     data_item["eval_score"] = score
     data_item["eval_loss"] = best_loss
