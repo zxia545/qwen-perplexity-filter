@@ -86,13 +86,17 @@ def evaluate_entry(data_entry, tokenizer, model, device, max_length=4096, mini_b
         model=model
     )
     
+    print(f"Scores: {scores}")
     # Lower loss indicates better candidate.
     sorted_candidates = sorted(scores.items(), key=lambda x: x[1])
     best_candidate, best_loss = sorted_candidates[0]
+    
+    print(f"Best candidate: {best_candidate}, Loss: {best_loss}")
     # Extract score number from candidate text (assumes candidate text format "This is score X")
     try:
         score_number = int(best_candidate.strip().split()[-1])
     except Exception:
+        print(f'Error extracting score from candidate: {best_candidate}')
         score_number = 1  # fallback default if extraction fails
     return score_number, best_loss, best_candidate
 
