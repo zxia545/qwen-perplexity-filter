@@ -2,6 +2,8 @@
 import argparse
 import json
 import time
+import os
+import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import torch
@@ -154,58 +156,57 @@ def process_item(data_item, tokenizer, model, device, max_length, mini_batch_siz
     """
     Process one JSON data entry with retries.
     """
-    attempts = 0
-    result = None
+
     
-    while attempts < max_retries and result is None:
-        # try:
-        #     is_correct, true_loss, false_loss, question_type = evaluate_entry(
-        #         data_item, tokenizer, model, device, max_length, mini_batch_size
-        #     )
-        #     result = {
-        #         "is_correct": is_correct,
-        #         "true_loss": true_loss,
-        #         "false_loss": false_loss,
-        #         "question_type": question_type
-        #     }
-        # except Exception as e:
-        #     raise ValueError(f"Error processing item (attempt {attempts}): {e}")
-        #     attempts += 1
-        #     print(f"Error processing item (attempt {attempts}): {e}")
-        #     time.sleep(1)
-        is_correct, true_loss, false_loss, question_type = evaluate_entry(
-            data_item, tokenizer, model, device, max_length, mini_batch_size
-        )
-        result = {
-            "is_correct": is_correct,
-            "true_loss": true_loss,
-            "false_loss": false_loss,
-            "question_type": question_type
-        }
-    
-    if result is None:
-        # Fallback values if all attempts failed
-        result = {
-            "is_correct": False,
-            "true_loss": 999999999.0,
-            "false_loss": 999999999.0,
-            "question_type": "unknown"
-        }
+    is_correct, true_loss, false_loss, question_type = evaluate_entry(
+        data_item, tokenizer, model, device, max_length, mini_batch_size
+    )
+    result = {
+        "is_correct": is_correct,
+        "true_loss": true_loss,
+        "false_loss": false_loss,
+        "question_type": question_type
+    }
     
     # Add evaluation results to the data item
     data_item.update(result)
-    data_item["eval_attempts"] = attempts + 1
     return data_item
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate model responses using True/False evaluation with confidence scores for both MC and open-ended questions.")
-    parser.add_argument("--input_file", type=str, required=True, help="Path to the input JSONL file.")
-    parser.add_argument("--output_file", type=str, required=True, help="Path to the output JSONL file.")
+    parser.add_argument("--input_file", type=str, help="Path to the input JSONL file.")
+    parser.add_argument("--output_file", type=str, help="Path to the output JSONL file.")
+    parser.add_argument("--input_folder", type=str, help="Path to the input folder.")
+    parser.add_argument("--output_folder", type=str, help="Path to the output folder.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the evaluation model")
     parser.add_argument("--max_tokens", type=int, default=4096, help="Max tokens for model inputs (default 4096).")
     parser.add_argument("--mini_batch_size", type=int, default=12, help="Mini-batch size for candidate evaluation (default 12).")
     parser.add_argument("--num-gpu-host-model", type=int, default=1, help="Number of GPUs to host the model (default 1).")
     args = parser.parse_args()
+    
+    # Validate arguments
+    if args.input_folder and args.output_folder:
+        # Folder mode - process all JSONL files in input folder
+        if not os.path.exists(args.input_folder):
+            raise ValueError(f"Input folder does not exist: {args.input_folder}")
+        
+        # Create output folder if it doesn't exist
+        os.makedirs(args.output_folder, exist_ok=True)
+        
+        # Get all JSONL files in input folder
+        jsonl_files = glob.glob(os.path.join(args.input_folder, "*.jsonl"))
+        if not jsonl_files:
+            raise ValueError(f"No JSONL files found in input folder: {args.input_folder}")
+            
+        print(f"Found {len(jsonl_files)} JSONL files in input folder")
+        
+    elif args.input_file and args.output_file:
+        # Single file mode
+        if not os.path.exists(args.input_file):
+            raise ValueError(f"Input file does not exist: {args.input_file}")
+        jsonl_files = [args.input_file]
+    else:
+        raise ValueError("Either provide --input_file and --output_file, or --input_folder and --output_folder")
 
     # Load tokenizer and model instances
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
@@ -220,63 +221,51 @@ def main():
         model_instance.config.use_cache = True
         model_list.append(model_instance)
     
-    # Read input JSONL file
-    data_items = read_jsonl(args.input_file)
-    processed_items = []
-
-    # Process items with ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=num_gpu_host_model) as executor:
-        futures = []
-        for idx, item in enumerate(data_items):
-            assigned_idx = idx % num_gpu_host_model
-            device = device_list[assigned_idx]
-            model = model_list[assigned_idx]
-            futures.append(
-                executor.submit(
-                    process_item,
-                    item,
-                    tokenizer,
-                    model,
-                    device,
-                    args.max_tokens,
-                    args.mini_batch_size
-                )
-            )
+    # Process each JSONL file
+    total_files = len(jsonl_files)
+    
+    for file_idx, input_file in enumerate(jsonl_files):
+        print(f"\n=== Processing file {file_idx + 1}/{total_files}: {os.path.basename(input_file)} ===")
         
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing items"):
-            processed_items.append(future.result())
-    
-    # Calculate statistics by question type
-    total_items = len(processed_items)
-    correct_predictions = sum(1 for item in processed_items if item.get("is_correct", False))
-    
-    # Statistics by question type
-    mc_items = [item for item in processed_items if item.get("question_type") == "multiple_choice"]
-    open_items = [item for item in processed_items if item.get("question_type") == "open_ended"]
-    
-    mc_correct = sum(1 for item in mc_items if item.get("is_correct", False))
-    open_correct = sum(1 for item in open_items if item.get("is_correct", False))
-    
-    print(f"\n=== Evaluation Results ===")
-    print(f"Total items: {total_items}")
-    print(f"Correct predictions: {correct_predictions} ({correct_predictions/total_items*100:.2f}%)")
-    
-    if mc_items:
-        print(f"\nMultiple Choice: {len(mc_items)} items")
-        print(f"MC Correct: {mc_correct} ({mc_correct/len(mc_items)*100:.2f}%)")
-    
-    if open_items:
-        print(f"\nOpen-ended: {len(open_items)} items") 
-        print(f"Open Correct: {open_correct} ({open_correct/len(open_items)*100:.2f}%)")
-    
-    
-    # Write results
-    write_jsonl(args.output_file, processed_items)
-    print(f"\n{len(processed_items)} items written to {args.output_file}")
-    
-    # Statistics for filtered items
-    correct_predictions = sum(1 for item in processed_items if item.get("is_correct", False))
-    print(f"Filtered items correct: {correct_predictions} ({correct_predictions/len(processed_items)*100:.2f}%)")
+        # Determine output file path
+        if args.input_folder and args.output_folder:
+            # Folder mode - construct output file path
+            input_filename = os.path.basename(input_file)
+            output_file = os.path.join(args.output_folder, input_filename)
+        else:
+            # Single file mode
+            output_file = args.output_file
+        
+        # Read input JSONL file
+        data_items = read_jsonl(input_file)
+        processed_items = []
+
+        # Process items with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_gpu_host_model) as executor:
+            futures = []
+            for idx, item in enumerate(data_items):
+                assigned_idx = idx % num_gpu_host_model
+                device = device_list[assigned_idx]
+                model = model_list[assigned_idx]
+                futures.append(
+                    executor.submit(
+                        process_item,
+                        item,
+                        tokenizer,
+                        model,
+                        device,
+                        args.max_tokens,
+                        args.mini_batch_size
+                    )
+                )
+            
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {os.path.basename(input_file)}"):
+                processed_items.append(future.result())
+        
+        # Write results for this file
+        write_jsonl(output_file, processed_items)
+        print(f"{len(processed_items)} items written to {output_file}")
+        
 
 if __name__ == "__main__":
     main()
